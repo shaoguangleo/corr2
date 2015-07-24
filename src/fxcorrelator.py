@@ -342,9 +342,9 @@ class FxCorrelator(Instrument):
         self.adc_demux_factor = int(self.configd['fengine']['adc_demux_factor'])
 
         #record the destination port and ip, checking it before
-        txip = tengbe.str2ip(self.configd['xengine']['output_destination_ip'])
+        txip = tengbe.IpAddress.str2ip(self.configd['xengine']['output_destination_ip'])
         txport = int(self.configd['xengine']['output_destination_port'])
-        self.xeng_tx_destination = (tengbe.ip2str(txip), txport)
+        self.xeng_tx_destination = (tengbe.IpAddress.ip2str(txip), txport)
         self.set_meta_destination(self.configd['xengine']['output_destination_ip'],
                                   int(self.configd['xengine']['output_destination_port']))
 
