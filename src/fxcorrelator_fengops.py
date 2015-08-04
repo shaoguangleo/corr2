@@ -252,17 +252,36 @@ def feng_subscribe_to_multicast(corr):
 def feng_set_delay(corr, source_name, delay=0, delta_delay=0, phase_offset=0, delta_phase_offset=0, ld_time=-1):
     """
     Set delay correction values for specified source. This is a blocking call. \n
-    By default, it will wait until load time and verify that things worked as expected. This check can be disabled by setting ld_check param to False. \n
+    By default, it will wait until load time and verify that things worked as expected. 
+    This check can be disabled by setting ld_check param to False. \n
     Load time is optional; if not specified, load ASAP.\n
     :return
     """
     corr.logger.info('Setting delay correction values for source %s' %source_name)
+   
+    feng_clk = self.sample_rate_hz/self.adc_demux_factor
+
+    #convert delay in time into delay in samples
+    delay_s = delay * self.sample_rate_hz                           # delay in clock cycles
     
+    #convert from cycles per second to cycles per feng fpga clock
+    delta_phase_offset_s = float(delta_phase_offset) / feng_clk
+
+    #TODO convert ld_time from seconds since 70s to mcnt
+    ld_time_s = ld_time
+ 
     #determine fhost to write to 
     for fhost in corr.fhosts:
         if source_name in fhost.delays.keys():
             try:
-                fhost.write_delay(source_name, delay, delta_delay, phase_offset, delta_phase_offset, ld_time)
+                [act_delay, act_delta_delay, act_phase_offset, act_delta_phase_offset] = fhost.write_delay(
+                                             source_name, delay_s, delta_delay, phase_offset, delta_phase_offset_s, ld_time)
+
+                corr.logger.debug('Delay actually set to %e samples.' % act_delay/self.sample_rate_hz)
+                corr.logger.debug('Delay rate actually set to %e seconds per second.' % act_delta_delay)
+                corr.logger.debug('Phase offset actually set to %6.3f degrees.' % act_phase_offset)
+                corr.logger.debug('Phase offset change actually set to %e Hz.' % act_delta_phase*feng_clk)
+
             except Exception as e:
                 corr.logger.error('New delay error - %s' % e.message)
                 raise ValueError('New delay error - %s' % e.message)

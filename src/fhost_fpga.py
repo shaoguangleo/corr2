@@ -239,10 +239,10 @@ class FpgaFHost(FpgaHost):
         Configures a given antenna to a delay in seconds using both the coarse and the fine delay. Also configures the fringe rotation components. This is a blocking call. \n
         By default, it will wait until load time and verify that things worked as expected. This check can be disabled by setting ld_check param to False. \n
         Load time is optional; if not specified, load ASAP.\n
-        \t delay is in seconds\n
-        \t delta delay is in seconds per second\n
+        \t delay is in samples\n
+        \t delta delay is in samples per sample\n
         \t phase offset is in degrees\n
-        \t delta phase offset is in cycles per second (Hz)\n
+        \t delta phase offset is in cycles per fengine FPGA clock sample\n
         """                   
      
         ###########################################################
@@ -258,9 +258,9 @@ class FpgaFHost(FpgaHost):
         bitshift_schedule =         23 
 
         # delays in terms of ADC clock cycles:
-        delay_n = delay * self.sample_rate_hz                           # delay in clock cycles
+        delay_n = delay                                                 # delay in clock cycles
         coarse_delay = int(delay_n)                                     # delay in whole clock cycles #testing for rev370
-        fine_delay = (delay_n-coarse_delay)                             # delay remainder. need a negative slope for positive delay
+        fine_delay = delay_n-coarse_delay                               # delay remainder. need a negative slope for positive delay
         fine_delay_shifted = int(fine_delay*(2**(fine_delay_bits)))     # shift up into integer range with range 0 to +pi
         
         # shift up into integer range as well offset shifted down by on FPGA
@@ -268,43 +268,35 @@ class FpgaFHost(FpgaHost):
 
         # figure out the phase offset as a fraction of a cycle
         fr_phase_offset = int(phase_offset/float(360) * (2**(phase_offset_bits)))
-        # figure out the phase offset rate. Input is in cycles per second (Hz). 1) divide by brd clock rate to get cycles per clock. 2) multiply by amount shifted down by on FPGA
-        feng_clk = (self.sample_rate_hz/self.adc_demux_factor)
-        fr_delta_phase_offset = int((float(delta_phase_offset) / feng_clk) * (2**(bitshift_schedule + delta_phase_offset_bits-1)))
+        # multiply by amount shifted down by on FPGA
+        fr_delta_phase_offset = int(delta_phase_offset * (2**(bitshift_schedule + delta_phase_offset_bits-1)))
 
-        act_delay = (coarse_delay + float(fine_delay_shifted)/(2**fine_delay_bits))/self.sample_rate_hz
-        act_delta_delay = float(delta_fine_delay)/(2**(bitshift_schedule + delta_fine_delay_bits-1))
-        act_phase_offset = float(fr_phase_offset)/(2**phase_bits)*360
-        act_delta_phase_offset = float(delta_phase_offset)/(2**(delta_phase_bits+bitshift_schedule-1))*feng_clk
+        act_delay               = (coarse_delay + float(fine_delay_shifted)/(2**fine_delay_bits))
+        act_delta_delay         = float(delta_fine_delay)/(2**(bitshift_schedule + delta_fine_delay_bits-1))
+        act_phase_offset        = float(fr_phase_offset)/(2**phase_bits)*360
+        act_delta_phase_offset  = float(delta_phase_offset)/(2**(delta_phase_bits+bitshift_schedule-1))
 
         if (delay != 0):
             if (fine_delay_shifted == 0) and (coarse_delay == 0):
                 corr.logger.info('Requested delay is too small for this configuration (our resolution is too low). Setting delay to zero.')
             elif abs(fine_delay_shifted) > 2**(fine_delay_bits):
-                raise corr.logger.error('Internal logic error calculating fine delays.')
+                corr.logger.error('Internal logic error calculating fine delays.')
             elif abs(coarse_delay) > (2**(coarse_delay_bits)):
-                raise corr.logger.error('Requested coarse delay (%es) is out of range (+-%es).' % (float(coarse_delay)/self.sample_rate_hz, float(2**(coarse_delay_bits-1))/self.sample_rate_hz))
-            else:
-                corr.logger.debug('Delay actually set to %e seconds.' % act_delay)
+                corr.logger.error('Requested coarse delay (%es) is out of range (+-%i samples).' % (coarse_delay, 2**(coarse_delay_bits-1))
+
         if (delta_delay != 0):
             if fine_delta_delay == 0:
                 corr.logger.info('Requested delay rate too slow for this configuration. Setting delay rate to zero.')
             if (abs(delta_fine_delay) > 2**(delta_fine_delay_bits-1)):
-                raise corr.logger.error('Requested delay rate out of range (+-%e).' % (2**(bitshift_schedule-1)))
-            else:
-                corr.logger.debug('Delay rate actually set to %e seconds per second.' % act_delta_delay)
+                corr.logger.error('Requested delay rate out of range (+-%e).' % (2**(bitshift_schedule-1)))
 
         if phase_offset != 0:
             if fr_phase_offset == 0:
                 corr.logger.info('Requested phase offset is too small for this configuration (we do not have enough resolution). Setting phase offset to zero.')
-            else:
-                corr.logger.debug('Phase offset actually set to %6.3f degrees.' % act_phase_offset)
 
         if delta_phase_offset != 0:
             if act_delta_phase_offset == 0:
                 corr.logger.info('Requested phase offset change is too slow for this configuration. Setting phase offset change to zero.')
-            else:
-                corr.logger.debug('Phase offset change actually set to %e Hz.' % act_delta_phase)
 
         #determine offset from source name
         offset = self.delays[source_name]['offset']
