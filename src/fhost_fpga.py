@@ -616,6 +616,14 @@ class FpgaFHost(DigitiserDataReceiver):
         LOGGER.info('%s: PFB okay.' % self.host)
         return True
 
+    def get_adc_snapshots(self):
+        """
+        Read the ADC snapshots from this Fhost
+        """
+        p0 = self.snapshots.snap_adc0_ss.read()['data']
+        p1 = self.snapshots.snap_adc1_ss.read()['data']
+        return {'p0': p0, 'p1': p1}
+
 '''
     def _get_fengine_fpga_config(self):
 
