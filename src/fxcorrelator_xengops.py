@@ -1,6 +1,6 @@
 import time
 import numpy
-import threading
+from tornado.ioloop import IOLoop
 
 from casperfpga import utils as fpgautils
 from casperfpga import tengbe
@@ -9,6 +9,7 @@ THREADED_FPGA_OP = fpgautils.threaded_fpga_operation
 THREADED_FPGA_FUNC = fpgautils.threaded_fpga_function
 
 use_xeng_sim = False
+
 
 def _xeng_vacc_check_errcheck(corr, last_values):
     """
@@ -26,7 +27,7 @@ def _xeng_vacc_check_errcheck(corr, last_values):
     new_data = THREADED_FPGA_OP(corr.xhosts, timeout=5, target_function=get_check_data)
 
     if last_values is None:
-        corr.logger.info(logstr + 'no last value')
+        corr.logger.debug(logstr + 'no last value')
         return False, new_data
 
     for fpga in new_data:
@@ -36,8 +37,9 @@ def _xeng_vacc_check_errcheck(corr, last_values):
                 corr.logger.error(logstr + '%s - %s error' % (fpga, reg))
                 return True, new_data
 
-    corr.logger.info(logstr + 'all okay')
+    corr.logger.debug(logstr + 'all okay')
     return False, new_data
+
 
 def _xeng_vacc_check_cb(corr, last_values, vacc_check_time):
     """
@@ -45,14 +47,14 @@ def _xeng_vacc_check_cb(corr, last_values, vacc_check_time):
     :param corr:
     :return:
     """
-    corr.logger.info('_xeng_vacc_check_cb: ran @ %.3f' % time.time())
+    corr.logger.debug('_xeng_vacc_check_cb: ran @ %.3f' % time.time())
     result, vals = _xeng_vacc_check_errcheck(corr, last_values)
     if result:
         xeng_vacc_sync(corr)
         _, vals = _xeng_vacc_check_errcheck(corr, last_values)
-    threading.Timer(vacc_check_time,
-                    _xeng_vacc_check_cb,
-                    [corr, vals, vacc_check_time], {}).start()
+    IOLoop.current().call_later(vacc_check_time, _xeng_vacc_check_cb,
+                                [corr, vals, vacc_check_time], {})
+
 
 def xeng_setup_vacc_check_timer(corr, vacc_check_time=10):
     """
@@ -62,9 +64,9 @@ def xeng_setup_vacc_check_timer(corr, vacc_check_time=10):
     :return:
     """
     corr.logger.info('xeng_setup_vacc_check_timer: setting up the vacc check timer')
-    threading.Timer(vacc_check_time,
-                    _xeng_vacc_check_cb,
-                    [corr, None, vacc_check_time], {}).start()
+    IOLoop.current().call_later(vacc_check_time, _xeng_vacc_check_cb,
+                                [corr, None, vacc_check_time], {})
+
 
 def xeng_initialise(corr):
     """
@@ -83,9 +85,6 @@ def xeng_initialise(corr):
     THREADED_FPGA_OP(corr.xhosts, timeout=10,
                      target_function=(lambda fpga_: fpga_.registers.control.write(gbe_rst=True),))
     xeng_clear_status_all(corr)
-
-    # set up accumulation length
-    xeng_set_acc_len(corr)
 
     # set up default destination ip and port
     corr.set_stream_destination()
@@ -112,10 +111,10 @@ def xeng_initialise(corr):
         for gbe, this_mac in zip(f.tengbes, macs):
             gbe.setup(mac=this_mac, ipaddress='0.0.0.0', port=xeng_port)
             corr.logger.info('xhost(%s) gbe(%s) mac(%s) port(%i) board_id(%i)' %
-                             (f.host, gbe, str(gbe.mac), xeng_port, board_id))
+                             (f.host, gbe.name, str(gbe.mac), xeng_port, board_id))
             # gbe.tap_start(restart=True)
             gbe.dhcp_start()
-    THREADED_FPGA_OP(corr.xhosts, timeout=30, target_function=(setup_gbes,))
+    THREADED_FPGA_OP(corr.xhosts, timeout=40, target_function=(setup_gbes,))
 
     # clear gbe status
     THREADED_FPGA_OP(corr.xhosts, timeout=10,
@@ -130,6 +129,9 @@ def xeng_initialise(corr):
         THREADED_FPGA_OP(corr.xhosts, timeout=10,
                          target_function=(lambda fpga_: fpga_.registers.simulator.write(en=True),))
 
+    # set up accumulation length
+    xeng_set_acc_len(corr,vacc_resync=False)
+
     # clear general status
     THREADED_FPGA_OP(corr.xhosts, timeout=10,
                      target_function=(lambda fpga_: fpga_.registers.control.write(status_clr='pulse'),))
@@ -137,12 +139,14 @@ def xeng_initialise(corr):
     # check for errors
     # TODO - read status regs?
 
+
 def xeng_clear_status_all(corr):
     """
     Clear the various status registers and counters on all the fengines
     :return:
     """
     THREADED_FPGA_FUNC(corr.xhosts, timeout=10, target_function='clear_status')
+
 
 def xeng_subscribe_to_multicast(corr):
     """
@@ -166,6 +170,7 @@ def xeng_subscribe_to_multicast(corr):
     else:
         corr.logger.info('F > X is unicast from base %s' % corr.fengine_output)
 
+
 def xeng_check_rx(corr, max_waittime=30):
     """
     Check that the x hosts are receiving data correctly
@@ -183,23 +188,34 @@ def xeng_check_rx(corr, max_waittime=30):
     corr.logger.info('\tdone.')
     return all_okay
 
+
 def xeng_vacc_sync(corr, vacc_load_time=None):
     """
     Sync the vector accumulators on all the x-engines.
     Assumes that the x-engines are all receiving data.
     :return:
     """
+    min_ld_time = 2
+    # how long should we wait for the vacc load
     if vacc_load_time is None:
-        unix_time_diff = 2
-    else:
-        time_now = time.time()
-        if vacc_load_time < time.time() + 1:
-            raise RuntimeError('Load time of %.4f makes no sense at current time %.4f' %
-                               (vacc_load_time, time_now))
-        unix_time_diff = vacc_load_time - time.time()
-    wait_time = unix_time_diff + 3
+        corr.logger.info("Vacc sync time not specified. Syncing in %2.2f seconds' time."
+                         % (2*min_ld_time))
+        vacc_load_time = time.time()+2*min_ld_time
 
-    corr.logger.info('xeng_vacc_sync: in %is' % unix_time_diff)
+    t_now = time.time()
+    if vacc_load_time < (t_now + min_ld_time):
+        raise RuntimeError(
+            'Cannot load at a time in the past. '
+            'Need at least %2.2f seconds lead time. You asked for %s.%i, '
+            'and it is now %s.%i.' % (
+                               min_ld_time,
+                               time.strftime('%H:%M:%S',time.gmtime(vacc_load_time)),
+                               (vacc_load_time-int(vacc_load_time))*100,
+                               time.strftime('%H:%M:%S',time.gmtime(t_now)),
+                               (t_now-int(t_now))*100) )
+
+    corr.logger.info('xeng vaccs syncing at %s (in %2.2fs)'
+                     % (time.ctime(),vacc_load_time-time.time()) )
 
     # check if the vaccs need resetting
     vaccstat = THREADED_FPGA_FUNC(corr.xhosts, timeout=10,
@@ -223,20 +239,18 @@ def xeng_vacc_sync(corr, vacc_load_time=None):
                 corr.logger.error(errstr)
                 raise RuntimeError(errstr)
 
-    # get current time from an f-engine
-    current_ftime = corr.fhosts[0].get_local_time()
-    assert current_ftime & 0xfff == 0, 'Bottom 12 bits of timestamp from f-engine are not zero?!'
-    corr.logger.info('\tCurrent f engine time: %i' % current_ftime)
-    # use that time to set the vacc load time on the xengines
-    ldtime = int(round(current_ftime + (unix_time_diff * corr.sample_rate_hz)))
+    # set the vacc load time on the xengines
+    ldmcnt = int(corr.mcnt_from_time(vacc_load_time))
     quantisation_bits = int(numpy.log2(int(corr.configd['fengine']['n_chans'])) + 1
                             + numpy.log2(int(corr.configd['xengine']['xeng_accumulation_len'])))
-    quanttime = (ldtime >> quantisation_bits) << quantisation_bits
-    unix_quant_time = quanttime / corr.sample_rate_hz * 1.0
+    ldmcnt = ((ldmcnt >> quantisation_bits)+1) << quantisation_bits
 
-    corr.logger.info('\tApplying load time: %i' % ldtime)
+    if corr.time_from_mcnt(ldmcnt) < time.time():
+        corr.logger.warn('Warning: the board timestamp has probably wrapped!')
+
+    corr.logger.info('\tApplying load time: %i.' % ldmcnt)
     THREADED_FPGA_FUNC(corr.xhosts, timeout=10,
-                       target_function=('vacc_set_loadtime', (ldtime,),))
+                       target_function=('vacc_set_loadtime', (ldmcnt,),))
 
     # read the current arm and load counts
     def print_vacc_statuses(vstatus):
@@ -272,9 +286,8 @@ def xeng_vacc_sync(corr, vacc_load_time=None):
                          'counts or arm count did not increase.'
                 corr.logger.error(errstr)
                 print_vacc_statuses(vacc_status)
-                print 'arm count:', arm_count
                 raise RuntimeError(errstr)
-    corr.logger.info('\tAfter arming: arm_count(%i) load_count(%i)' % (arm_count+1, load_count))
+    corr.logger.info('\tDone arming')
 
     # check the the load time was stored correctly
     lsws = THREADED_FPGA_OP(corr.xhosts, timeout=10,
@@ -298,32 +311,38 @@ def xeng_vacc_sync(corr, vacc_load_time=None):
     corr.logger.info('\tx engines have vacc ld time %i' % xldtime)
 
     # wait for the vaccs to arm
-    corr.logger.info('\twaiting %i seconds for accumulations to start' % wait_time)
+    wait_time = corr.time_from_mcnt(ldmcnt) - time.time() + 0.2
+    corr.logger.info('\tWaiting %2.2f seconds for arm to trigger.' % wait_time)
     time.sleep(wait_time)
-
     # check the status to see that the load count increased
-    vacc_status = THREADED_FPGA_FUNC(corr.xhosts, timeout=10,
+    vacc_status = THREADED_FPGA_FUNC(corr.xhosts, timeout=5,
                                      target_function='vacc_get_status')
     for host in corr.xhosts:
         for status in vacc_status[host.host]:
             if ((status['loadcount'] != vacc_status[corr.xhosts[0].host][0]['loadcount']) or
                     (status['loadcount'] != load_count + 1)):
-                corr.logger.error('All hosts did not load the VACCs.')
+                corr.logger.error('VACC did not trigger!')
                 print_vacc_statuses(vacc_status)
-                print load_count
-                raise RuntimeError
-    corr.logger.info('\tAfter trigger: arm_count(%i) load_count(%i)' % (arm_count+1, load_count+1))
+                raise RuntimeError('VACC did not trigger!')
     corr.logger.info('\tAll VACCs triggered correctly.')
+
+    #allow vacc to flush and correctly populate parity bits:
+    corr.logger.info('\tWaiting %2.2fs for an accumulation to flush, '
+                     'to correctly populate parity bits.' %
+                     xeng_get_acc_time(corr))
+    time.sleep(xeng_get_acc_time(corr)+0.2)
 
     corr.logger.info('\tClearing status and reseting counters.')
     THREADED_FPGA_FUNC(corr.xhosts, timeout=10,
                        target_function='clear_status')
-    time.sleep(xeng_get_acc_time(corr)+1)
 
-    # if accumulation_len in config is long, we get some parity errors when we read
-    # the status here, but not again :(
+    #wait for a good accumulation to finish.
+    corr.logger.info('\tWaiting %2.2fs for an accumulation to flush '
+                     'before checking counters.'%xeng_get_acc_time(corr))
+    time.sleep(xeng_get_acc_time(corr)+0.2)
+
     corr.logger.info('\tChecking for errors & accumulations...')
-    vacc_status = THREADED_FPGA_FUNC(corr.xhosts, timeout=10,
+    vacc_status = THREADED_FPGA_FUNC(corr.xhosts, timeout=5,
                                      target_function='vacc_get_status')
     errors_found = False
     for host in corr.xhosts:
@@ -336,7 +355,7 @@ def xeng_vacc_sync(corr, vacc_load_time=None):
                 errors_found = True
     if errors_found:
         vacc_error_detail = THREADED_FPGA_FUNC(corr.xhosts,
-                                               timeout=10,
+                                               timeout=5,
                                                target_function='vacc_get_error_detail')
         corr.logger.error('xeng_vacc_sync: exited on VACC error')
         corr.logger.error('xeng_vacc_sync: vacc statii:')
@@ -347,9 +366,10 @@ def xeng_vacc_sync(corr, vacc_load_time=None):
             corr.logger.error('\t%s: %s' % (host, str(item)))
         raise RuntimeError('xeng_vacc_sync: exited on VACC error')
     corr.logger.info('\t...accumulations rolling in without error.')
-    return unix_quant_time
+    return corr.time_from_mcnt(ldmcnt)
 
-def xeng_set_acc_time(corr, acc_time_s):
+
+def xeng_set_acc_time(corr, acc_time_s, vacc_resync=True):
     """
     Set the vacc accumulation length based on a required dump time, in seconds
     :param acc_time_s: new dump time, in seconds
@@ -358,14 +378,10 @@ def xeng_set_acc_time(corr, acc_time_s):
     if use_xeng_sim:
         raise RuntimeError('That\'s not an option anymore.')
     else:
-        new_acc_len = (corr.sample_rate_hz * acc_time_s) / (corr.xeng_accumulation_len * corr.n_chans * 2.0)
+        new_acc_len = (corr.sample_rate_hz * acc_time_s) /
+                       (corr.xeng_accumulation_len * corr.n_chans * 2.0)
         new_acc_len = round(new_acc_len)
-        corr.logger.info('New accumulation time %.2f becomes accumulation length %d' % (acc_time_s, new_acc_len))
-        xeng_set_acc_len(corr, new_acc_len)
-    if corr.spead_meta_ig is not None:
-        corr.spead_meta_ig['n_accs'] = corr.accumulation_len * corr.xeng_accumulation_len
-        corr.spead_meta_ig['int_time'] = xeng_get_acc_time(corr)
-        corr.spead_tx.send_heap(corr.spead_meta_ig.get_heap())
+        xeng_set_acc_len(corr, new_acc_len, vacc_resync)
 
 def xeng_get_acc_time(corr):
     """
@@ -374,7 +390,7 @@ def xeng_get_acc_time(corr):
     """
     return (corr.xeng_accumulation_len * corr.accumulation_len * corr.n_chans * 2.0) / corr.sample_rate_hz
 
-def xeng_set_acc_len(corr, acc_len=None):
+def xeng_set_acc_len(corr, acc_len=None, vacc_resync=True):
     """
     Set the QDR vector accumulation length.
     :param acc_len:
@@ -385,12 +401,15 @@ def xeng_set_acc_len(corr, acc_len=None):
     THREADED_FPGA_OP(corr.xhosts, timeout=10,
                      target_function=(lambda fpga_:
                                       fpga_.registers.acc_len.write_int(corr.accumulation_len),))
-    corr.logger.info('Set accumulation length %d system-wide (%.2f seconds)' %
+    corr.logger.info('Set VACC accumulation length %d system-wide (%.2f seconds)' %
                      (corr.accumulation_len, xeng_get_acc_time(corr)))
     if corr.spead_meta_ig is not None:
         corr.spead_meta_ig['n_accs'] = corr.accumulation_len * corr.xeng_accumulation_len
         corr.spead_meta_ig['int_time'] = xeng_get_acc_time(corr)
         corr.spead_tx.send_heap(corr.spead_meta_ig.get_heap())
+    if vacc_resync:
+        xeng_vacc_sync(corr)
+
 
 def xeng_get_baseline_order(corr):
         """
