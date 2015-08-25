@@ -178,7 +178,7 @@ class UnpackDengPacketCapture(object):
 
         self.pcap_reader = dpkt.pcap.Reader(self.pcap_file)
 
-    def decode(self):
+    def decode(self, no_gaps=False):
         """Decode packets close pcap file
 
         Return Values
@@ -189,6 +189,8 @@ class UnpackDengPacketCapture(object):
             digitiser timestamps at the start of each packet of 4096 samples
         voltages : numpy Float array
             Voltage time-series normalised to between -1 and 1.
+        no_gaps : bool
+            Raise ValueError exception if the seem to be gaps in the time series
 
         """
         try:
@@ -234,6 +236,9 @@ class UnpackDengPacketCapture(object):
         if not np.all(time_jumps == samples_per_pkt):
             LOGGER.info("It looks like gaps exist in captured data -- were "
                         "packets dropped?")
+            if no_gaps:
+                self.pcap_file.close()
+                raise ValueError('Gaps in captured voltage timeseries')
 
         self.pcap_file.close()
         return (sorted_time_keys, data)
