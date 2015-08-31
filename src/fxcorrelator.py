@@ -134,7 +134,17 @@ class FxCorrelator(Instrument):
                 self.qdr_calibrate()
             else:
                 self.logger.info('Skipping QDR cal - are you sure you want to do this?')
-
+	
+	     # hack to remove the fourth gbe core from the f-engines
+            for fhost in self.fhosts:
+                try:
+                    fhost.tengbes.remove_attribute('test_gbe4')
+                except ValueError:
+                    pass
+                try:
+                    fhost.tengbes.remove_attribute('gbe4')
+                except ValueError:
+                    pass
             # init the f engines
             fengops.feng_initialise(self)
 
