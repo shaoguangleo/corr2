@@ -118,6 +118,9 @@ if __name__ == '__main__':
         args.config = os.environ['CORR2INI']
     if args.config == '':
         raise RuntimeError('No config file.')
+    def cleanup_casper_logging():
+        noisy_logger = logging.getLogger('casperfpga.tengbe')
+        noisy_logger.setLevel(logging.CRITICAL)
 
     ioloop = IOLoop.current()
     sensor_server = Corr2SensorServer('127.0.0.1', args.port)
@@ -128,4 +131,7 @@ if __name__ == '__main__':
     ioloop.add_callback(sensor_server.start)
     instrument = fxcorrelator.FxCorrelator('RTS correlator', config_source=args.config)
     ioloop.add_callback(sensor_server.initialise, instrument)
+    # NASTY HACK to silence casperfpga.tengbe logger which seems to have a mind
+    # of its own
+    ioloop.call_later(5, cleanup_casper_logging)
     ioloop.start()
